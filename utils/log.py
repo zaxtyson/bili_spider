@@ -1,4 +1,5 @@
 import logging.config
+import config
 import sys
 from os.path import dirname
 
@@ -10,7 +11,7 @@ config = {
     "loggers": {
         "bili_spider": {
             "level": "DEBUG",
-            "handlers": ["console", "file"]
+            "handlers": config.LOG_APPENDER
         },
     },
     "handlers": {

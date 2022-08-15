@@ -1,90 +1,111 @@
 import random
 from datetime import datetime
-from threading import Thread, Lock
-from time import sleep
-
-import requests
+import asyncio
+from aiohttp import ClientSession, AsyncResolver, TCPConnector
 
 import config
 from utils.log import logger
+from typing import List
 
 
-class ProxyPool(Thread):
+class ProxyPool:
 
     def __init__(self):
-        super().__init__()
+        self._lock = asyncio.Lock()
         self._stop = False
-        self._lock = Lock()
         self._proxies = []
+        self._session = None
 
-    def has_available_proxy(self) -> bool:
-        return len(self._proxies) > 0
+    async def _init(self):
+        con = TCPConnector(ttl_dns_cache=300, resolver=AsyncResolver())
+        self._session = ClientSession(connector=con)
 
-    def fetch_new_proxies(self):
-        resp = requests.get(config.PROXY_POOL.get("api"))
-        for _ in range(3):
-            if resp.status_code != 200:
-                continue
-            data = resp.json()["data"]
-            new_proxies = []
-            for item in data:
+    async def _fetch_new_proxies(self) -> List[dict]:
+        async with self._session.get(config.PROXY_POOL.get("api")) as rsp:
+            if rsp.status != 200:
+                return []
+            rsp_json = await rsp.json(content_type=None)
+            if not rsp_json["data"]:
+                logger.warning(
+                    f"ProxyPool fetch new proxies failed: {rsp_json['msg']}")
+                return []
+            proxies = []
+            for item in rsp_json["data"]:
                 host = f"{item['ip']}:{item['port']}"
-                new_proxies.append({
+                proxies.append({
                     "host": host,
                     "http": f"http://{host}",
                     "https": f"http://{host}",
                     "expire_time": datetime.strptime(item["expire_time"], "%Y-%m-%d %H:%M:%S")
                 })
+            return proxies
 
-            if len(new_proxies) > 0:
-                self._lock.acquire()
-                self._proxies.extend(new_proxies)
-                self._lock.release()
-                logger.info(f"ProxyPool add {len(new_proxies)} proxy, total: {len(self._proxies)}")
+    async def _update_proxies(self):
+        async with self._lock:
+            if len(self._proxies) >= config.PROXY_POOL.get("pool_size"):
                 return
 
-            logger.warning(f"ProxyPool fetch new proxies failed: {resp.json()['msg']}")
+        for _ in range(3):
+            proxies = await self._fetch_new_proxies()
+            if len(proxies) == 0:
+                continue
 
-    def remove_proxy(self, http_proxy: str) -> None:
-        logger.warning(f"Remove proxy: {http_proxy}")
-        self._lock.acquire()
-        self._proxies = list(filter(lambda proxy: proxy["http"] != http_proxy, self._proxies))
-        self._lock.release()
+            async with self._lock:
+                self._proxies.extend(proxies)
+                logger.info(
+                    f"ProxyPool add {len(proxies)} proxy, total: {len(self._proxies)}")
+            break
 
-    def update_proxies(self):
-        valid_proxies = []
-        for proxy in self._proxies:
-            # proxy is unavailable
-            if proxy["expire_time"] <= datetime.now():
-                valid_proxies.append(proxy)
-        # drop this proxy
-        self._lock.acquire()
-        for proxy in valid_proxies:
-            self._proxies.remove(proxy)
-        self._lock.release()
-        if len(valid_proxies) > 0:
-            logger.info(f"ProxyPool remove {len(valid_proxies)} unavailable proxies")
+    async def _check_proxies(self):
+        available_proxies = list(
+            filter(lambda proxy: proxy["expire_time"] > datetime.now(), self._proxies))
+        async with self._lock:
+            drop_count = len(self._proxies) - len(available_proxies)
+            if drop_count > 0:
+                self._proxies = available_proxies
+                logger.info(
+                    f"ProxyPool remove {drop_count} unavailable proxies")
 
-    def get_random_proxy(self) -> str:
-        while len(self._proxies) == 0:
-            sleep(1)  # wait available proxy
-        self._lock.acquire()
-        http_proxy = random.choice(self._proxies)["http"]
-        self._lock.release()
-        return http_proxy
+    async def remove_proxy(self, host: str):
+        available_proxies = list(
+            filter(lambda proxy: proxy["host"] != host, self._proxies))
+        async with self._lock:
+            self._proxies = available_proxies
+        logger.info(f"ProxyPool remove {host}")
+
+    async def get_random_proxy(self) -> str:
+        while True:
+            async with self._lock:
+                if self._proxies:
+                    proxy = random.choice(self._proxies)
+                    return proxy["http"]
+            await asyncio.sleep(1)  # wait available proxy
 
     def stop(self):
         self._stop = True
 
-    def run(self) -> None:
-        self.fetch_new_proxies()
+    async def run(self) -> None:
+        await self._init()
         while not self._stop:
-            self.update_proxies()
-            if len(self._proxies) < config.PROXY_POOL.get("pool_size"):
-                self.fetch_new_proxies()
-            sleep(3)
+            await self._update_proxies()
+            await self._check_proxies()
+            await asyncio.sleep(3)
 
+
+async def consumer(pool: ProxyPool):
+    while True:
+        print("Waiting for proxy")
+        proxy = await pool.get_random_proxy()
+        print("Got random proxy: ", proxy)
+        await asyncio.sleep(0.5)
+
+
+async def main():
+    pool = ProxyPool()
+    await asyncio.gather(
+        pool.run(),
+        consumer(pool)
+    )
 
 if __name__ == '__main__':
-    pool = ProxyPool()
-    pool.start()
+    asyncio.run(main())

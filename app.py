@@ -1,33 +1,27 @@
-from spider.anime import AnimeInfoSpider
-from spider.guichu import GuichuInfoSpider
 from spider.up_info import UpInfoSpider
-from core.http_client import client
 import asyncio
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import signal
+from utils.statistics import statistics
+from concurrent.futures import ProcessPoolExecutor, as_completed, ThreadPoolExecutor, wait
+import os
+from utils.log import logger
 
 
-async def main():
-    loop = asyncio.get_running_loop()
-    await client.init(loop)
-    client.wait_proxy_pool_available()
+def spider_task(mid_range):
+    spider = UpInfoSpider()
+    start, end = mid_range
+    asyncio.run(spider.run_with_range(start, end))
 
-    # start spider
-    # await AnimeInfoSpider().run()
-    # await GuichuInfoSpider().run()
-    tasks = []
-    for i in range(100000, 500000, 1000):
-        tasks.append(UpInfoSpider().run(i, i+1000))
-    print(f"task nums={len(tasks)}")
-    await asyncio.gather(*tasks)
 
-    # close resource
-    await client.close()
-    # storage.wait_finish()
+def main():
+    # total_mid = 703223210
+    cpu_cores = os.cpu_count()
+    logger.info(f"ProcessPoolExecutor workers={cpu_cores}")
+    with ProcessPoolExecutor(cpu_cores) as executor:
+        executor.map(spider_task, [(1000, 2000), (2000, 3000)])
+
 
 if __name__ == "__main__":
-    # with ThreadPoolExecutor(max_workers=16) as executor:
-    #     tasks = []
-    #     for i in range(1, 500000, 5000):
-    #         tasks.append(executor.submit(asyncio.run, main(i, i+5000)))
-    #     as_completed(tasks)
-    asyncio.run(main())
+    statistics.run()
+    main()
+    statistics.stop()

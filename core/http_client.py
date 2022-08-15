@@ -3,13 +3,13 @@ import os
 from typing import Optional
 
 from aiohttp import ClientSession, ClientTimeout, AsyncResolver, TCPConnector
+from aiohttp.client_exceptions import ClientProxyConnectionError
 import config
-import time
 from utils.log import logger
 from utils.useragent import get_random_ua
 from core.proxy_pool import ProxyPool
 
-__all__ = ["client"]
+__all__ = ["HttpClient"]
 
 if os.name == "nt":
     # https://stackoverflow.com/questions/63653556/raise-notimplementederror-notimplementederror
@@ -17,11 +17,11 @@ if os.name == "nt":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 
-class HttpSession:
+class HttpClient:
 
     def __init__(self):
         self._session: Optional[ClientSession] = None
-        self._proxy_pool = ProxyPool()
+        self._proxy_pool = None
 
         # https://docs.aiohttp.org/en/stable/client_quickstart.html#timeouts
         self._timeout = ClientTimeout(
@@ -31,35 +31,33 @@ class HttpSession:
         self._dns_server = config.HTTP_CLIENT.get("dns_server")
         self._enable_proxy_pool = config.PROXY_POOL.get("enable")
 
-    async def init(self, loop):
+    async def init(self):
         if self._dns_server:
             logger.info(f"Use custom DNS server: {self._dns_server}")
 
         # use async dns resolver
         resolver = AsyncResolver(nameservers=self._dns_server)
         con = TCPConnector(ttl_dns_cache=300, resolver=resolver)
-        self._session = ClientSession(loop=loop, connector=con)
+        self._session = ClientSession(connector=con)
+
+        self._proxy_pool = ProxyPool()
+        if not self._enable_proxy_pool:
+            logger.info("ProxyPool is not enable")
+        else:
+            logger.info("ProxyPool is enabled")
+            asyncio.create_task(self._proxy_pool.run())
 
     async def close(self):
         if self._session:
             await self._session.close()
+            logger.info("HttpClient session is closed")
         if self._enable_proxy_pool:
             self._proxy_pool.stop()
+            logger.info("HttpClient proxy pool is closed")
 
-    def wait_proxy_pool_available(self):
-        if not self._enable_proxy_pool:
-            logger.info("ProxyPool is not enable")
-            return
-
-        self._proxy_pool.setDaemon(True)
-        self._proxy_pool.start()
-        while not self._proxy_pool.has_available_proxy():
-            logger.info("Waiting for proxy available...")
-            time.sleep(1)
-
-    def _set_request_args(self, kwargs: dict):
+    async def _set_request_args(self, kwargs: dict):
         if self._enable_proxy_pool:
-            kwargs.setdefault("proxy", self._proxy_pool.get_random_proxy())
+            kwargs.setdefault("proxy", await self._proxy_pool.get_random_proxy())
         # set timeout for per connection
         kwargs.setdefault("timeout", self._timeout)
         # ignore ssl error
@@ -70,8 +68,8 @@ class HttpSession:
         else:
             kwargs.setdefault("headers", {"User-Agent": get_random_ua()})
 
-    def do(self, method: str, url: str, **kwargs):
-        self._set_request_args(kwargs)
+    async def do(self, method: str, url: str, **kwargs):
+        await self._set_request_args(kwargs)
         logger.debug(f"{method} {url} {kwargs=}")
         if method == "HEAD":
             return self._session.head(url, **kwargs)
@@ -83,36 +81,47 @@ class HttpSession:
             logger.error(f"Method not support: {method}")
             return None
 
-    def head(self, url: str, **kwargs):
-        return self.do("HEAD", url, **kwargs)
+    async def head(self, url: str, **kwargs):
+        return await self.do("HEAD", url, **kwargs)
 
-    def get(self, url: str, **kwargs):
-        return self.do("GET", url, **kwargs)
+    async def get(self, url: str, **kwargs):
+        return await self.do("GET", url, **kwargs)
 
-    def post(self, url: str, **kwargs):
-        return self.do("POST", url, **kwargs)
+    async def post(self, url: str, **kwargs):
+        return await self.do("POST", url, **kwargs)
 
-    async def get_json_data(self, url: str, **kwargs) -> dict:
+    async def get_json_data(self, url: str, **kwargs) -> Optional[dict]:
+        rsp_json = {}
+        last_status = 0
         for _ in range(config.HTTP_CLIENT.get("retry_times")):
             try:
-                async with self.get(url, **kwargs) as r:
+                async with (await self.get(url, **kwargs)) as r:
                     if not r or r.status != 200:
+                        last_status = r.status  # 412
                         continue
                     rsp_json = await r.json(content_type=None)
-                    if rsp_json["code"] in [0, 88214]:
+                    code = rsp_json["code"]
+                    if code == 0:
                         return rsp_json["data"]
-                    elif rsp_json["code"] == -412: # request ban
-                        # await asyncio.sleep(1)
+                    elif code == 88214:  # up主未开通充电
+                        return {}
+                    elif code == -412:  # request ban
                         continue
                     else:
-                        logger.error(f"Error, {rsp_json=}")
-                        return {}
+                        logger.debug(f"Error, {rsp_json=}")
+                        return None
+            except ClientProxyConnectionError as e:
+                host = f"{e._conn_key.host}:{e._conn_key.port}"
+                logger.info(e)
+                await self._proxy_pool.remove_proxy(host)
+            except asyncio.exceptions.TimeoutError as e:
+                logger.info(e)
             except Exception as e:
+                logger.debug(f"Error, {rsp_json=}")
                 logger.exception(e)
-                return {}
-        logger.error(f"Failed to get {url} {kwargs=}")
-        return {}
+                return None # break retry
 
-
-# global async http session
-client = HttpSession()
+        # failed, usually 412
+        logger.debug(
+            f"Failed to get {url} {kwargs=}, {rsp_json=}, {last_status=}")
+        return None
