@@ -1,7 +1,7 @@
 from utils.log import logger
 import time
 from threading import Thread
-from multiprocessing import Queue
+from multiprocessing import Queue  # for PIC
 
 __all__ = ["statistics"]
 
@@ -24,7 +24,7 @@ class Statistics:
         logger.info(f"Record accept {mid=}")
         self._accept_mid_queue.put(mid)
 
-    def _dump(self):
+    def __dump(self):
         logger.debug(f"Dump task running...")
         if self._failed_mid_queue.qsize() != 0:
             failed_mids = []
@@ -44,21 +44,21 @@ class Statistics:
                 logger.info(
                     f"Dump accept {len(accept_mids)} mid(s) to file: {self._accept_mid_file}")
 
-    def _dump_with_interval(self, interval: float):
+    def __dump_with_interval(self, interval: float):
         logger.info("Statistics dump thread running")
         while not self._stop:
             time.sleep(interval)
-            self._dump()
+            self.__dump()
 
     def run(self):
         self._dump_thread = Thread(
-            name="StatisticsDumpThread", target=self._dump_with_interval, args=(3,))
+            name="StatisticsDumpThread", target=self.__dump_with_interval, args=(3,))
         self._dump_thread.setDaemon(True)
         self._dump_thread.start()
 
     def stop(self):
         self._stop = True
-        self._dump()
+        self.__dump()
         # self._dump_thread.join()
         logger.info("Statistics stopped")
 
