@@ -22,12 +22,12 @@ SPIDER_FILTER = {
 
 # spider config
 SPIDER_CONFIG = {
-    "parallel_co_tasks": 300,
-    "save_path": "data/up_info.dat"
+    "parallel_co_tasks": 500,
+    "save_path": "data/up_info_test.dat"
 }
 
 PROXY_POOL = {
-    "enable": True,
+    "enable": False,
     "type": "juliang",  # "file"/"zhima"/"juliang"
     "file": {
         "path": "data/proxies"
@@ -39,8 +39,8 @@ PROXY_POOL = {
     },
     "juliang": {
         # https://www.juliangip.com/
-        "pool_size": 5000,
-        "api": "http://v2.api.juliangip.com/unlimited/getips?ip_remain=1&num=20&pt=1&result_type=json&trade_no=5633051359267008&sign=1f8eabbf3663a4cac67d59135f0faadf"
+        "pool_size": 2000,
+        "api": "http://v2.api.juliangip.com/dynamic/getips?ip_remain=1&num=10&pt=1&result_type=json&trade_no=1786806280220473&sign=cf797a634332a12c9478d0d9086daa32"
     }
 }
 

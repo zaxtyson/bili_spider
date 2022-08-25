@@ -173,14 +173,14 @@ class UpInfoSpider:
 
     async def process_up_info(self, mid: int):
         try:
+            # find up's followings
+            followings = await self.get_followings(mid)
+            await self._mid_pool.add_mid_set(followings)
             # fetch up details and save to disk
             info = await self.get_up_info(mid)
             if not info: # dropped
                 return
             await storage.write(info.to_json(ensure_ascii=False), self._save_path)
-            # find up's followings
-            followings = await self.get_followings(mid)
-            await self._mid_pool.add_mid_set(followings)
         except Exception as e:
             await self._mid_pool.add_failed_mid(mid)
             logger.exception(e)
@@ -199,8 +199,8 @@ class UpInfoSpider:
 
     async def run_with_mids(self, mids: Set[int]):
         self._mid_pool.init()
-        await self._client.init()
         await self._mid_pool.add_mid_set(mids)  # seed mids
+        await self._client.init()
         
         task = None
         try:
